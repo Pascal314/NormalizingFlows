@@ -14,26 +14,32 @@ class Invertable1x1Conv(distrax.Bijector):
     def forward_and_log_det(self, x):
         y = self.conv(x)
         W = next(iter(self.conv.params_dict().values()))
-        logdet = x.shape[1] * jnp.log(jnp.linalg.det(W))
+        logdet = jnp.log(jnp.abs(jnp.linalg.det(W)))
         return y, logdet
 
     def inverse_and_log_det(self, y):
         W = next(iter(self.conv.params_dict().values()))
         W_inv = jnp.linalg.inv(W)
 
-        # (0, n, n-1, ... 1,)
-        input_axis_perm = (0, *range(self.num_spatial_dims + 1, 0, -1))
+        # Move channels to the front
+        # (0, 3, 1, ..., n)
+        input_axis_perm = (0, self.num_spatial_dims + 1, *range(1, self.num_spatial_dims + 1))
+        # Move channels to the back
+        # (0, 2, ..., n, 1)
+        output_axis_perm = (0, *range(2, self.num_spatial_dims + 2), 1)
+        # Move spatial dimensions to the back (is this really correct? seems like I am also reversing the batch/spatial dims)
         # (n, n-1, n-2, ..., 0)
         filter_axis_perm = (*range(self.num_spatial_dims + 1, -1, -1),)
 
         window_strides = (1,) * self.num_spatial_dims
-        y = jax.lax.conv(jnp.transpose(x, input_axis_perm), jnp.transpose(W_inv, filter_axis_perm) , window_strides, 'same')
-        logdet = x.shape[1] * jnp.log(jnp.linalg.det(W_inv))
+        x = jax.lax.conv(jnp.transpose(y, input_axis_perm), jnp.transpose(W_inv, filter_axis_perm) , window_strides, 'same')
+        logdet = jnp.log(jnp.abs(jnp.linalg.det(W_inv)))
+        x = jnp.transpose(x, output_axis_perm)
         return x, logdet
 
 
 class ActnormModule(hk.Module):
-    eps = 1e-8
+    eps = 1e-12
     def __call__(self, x, reverse=False):
         # notation taken from GLOW
         b = hk.get_parameter('b', (1,) * (len(x.shape) - 1) + (x.shape[-1],), init=hk.initializers.Constant(0.))
@@ -41,9 +47,9 @@ class ActnormModule(hk.Module):
         logdet = jnp.sum(jnp.log(jnp.abs(s)))
 
         if not reverse:
-            y = s * (x + b)
+            y = s * x + b
         else:
-            y = x / (b + self.eps) - s
+            y = (x - b) / (s + self.eps)
             logdet = -logdet
         return y, logdet
 
@@ -82,32 +88,4 @@ def make_flowblock(input_shape, coupling_conditioner):
 
 
 if __name__ == "__main__":
-    shape = (1, 10, 10, 4)
-    x= np.random.normal(size=(1, 10, 10, 4))
-    
-    def coupler(x):
-        net = hk.Sequential([
-            hk.Flatten(),
-            hk.nets.MLP( (32, 32, 2 // 2 * np.prod(shape[1:])) ),
-            hk.Reshape( (*shape[1:-1], 2, 2))
-        ])
-        return net(x)
-
-    def forward(x):
-        conv = make_flowblock(shape, coupler)
-        return conv.forward_and_log_det(x)
-
-    def backward(x):
-        conv = make_flowblock(shape, coupler)
-        return conv.inverse_and_log_det(x)
-
-    fwd = hk.without_apply_rng(hk.transform(forward))
-    params = fwd.init(jax.random.PRNGKey(42), x)
-    y, logdet = fwd.apply(params, x)
-
-
-    bwd = hk.without_apply_rng(hk.transform(backward))
-    inv, inv_logdet = bwd.apply(params, y)
-
-    assert np.allclose(x - inv, 0, atol=1e-5), (x - inv)
-    assert np.allclose(logdet + inv_logdet, 0, atol=1e-5), (logdet + inv_logdet)
+    pass
