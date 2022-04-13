@@ -4,11 +4,18 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+class RandomRotationMatrix(hk.initializers.Initializer):
+    def __call__(self, shape, dtype):
+        # Assumes the final 2 dimensions are the (in_channels, out_channels) dims
+        perm = jax.random.permutation(hk.next_rng_key(), shape[-1])
+        W = jnp.zeros((shape[-1], shape[-1]), dtype=dtype)
+        W = W.at[jnp.arange(shape[-1]), perm].set(1.)
+        return jnp.broadcast_to(W, shape)
 
 class Invertable1x1Conv(distrax.Bijector):
     def __init__(self, event_ndims_in, n_channels, num_spatial_dims):
         super().__init__(event_ndims_in)
-        self.conv = hk.ConvND(num_spatial_dims, n_channels, 1, with_bias=False)
+        self.conv = hk.ConvND(num_spatial_dims, n_channels, 1, with_bias=False, w_init=hk.initializers.Orthogonal())
         self.num_spatial_dims = num_spatial_dims
     
     def forward_and_log_det(self, x):
@@ -34,6 +41,7 @@ class Invertable1x1Conv(distrax.Bijector):
         window_strides = (1,) * self.num_spatial_dims
         x = jax.lax.conv(jnp.transpose(y, input_axis_perm), jnp.transpose(W_inv, filter_axis_perm) , window_strides, 'same')
         logdet = jnp.log(jnp.abs(jnp.linalg.det(W_inv)))
+
         x = jnp.transpose(x, output_axis_perm)
         return x, logdet
 
@@ -64,6 +72,21 @@ class ActNormBijector(distrax.Bijector):
     def inverse_and_log_det(self, y):
         return self.actnorm(y, reverse=True)
 
+def make_affine_coupler(split_index, event_ndims_in, coupling_conditioner):
+    bijector = lambda params: distrax.ScalarAffine(params['shift'], params['scale'])
+
+    def conditioner(x):
+        output = coupling_conditioner(x)
+        return {'shift': output[..., 0], 'scale': jax.nn.sigmoid(output[..., 1] + 2.)}
+
+    coupler = distrax.SplitCoupling(
+        split_index=split_index, 
+        event_ndims=event_ndims_in, 
+        conditioner=conditioner, 
+        bijector=bijector)
+    return coupler
+
+
 def make_flowblock(input_shape, coupling_conditioner):
     event_ndims_in = len(input_shape) - 1
     num_spatial_dims = len(input_shape) - 2
@@ -73,19 +96,62 @@ def make_flowblock(input_shape, coupling_conditioner):
 
     split_index = input_shape[-1] // 2
     bijector = lambda params: distrax.ScalarAffine(params['shift'], params['scale'])
-
-    def conditioner(x):
-        output = coupling_conditioner(x)
-        return {'shift': output[..., 0], 'scale': output[..., 1]}
-
-    coupler = distrax.SplitCoupling(
-        split_index=split_index, 
-        event_ndims=event_ndims_in, 
-        conditioner=conditioner, 
-        bijector=bijector)
+    coupler = make_affine_coupler(split_index, event_ndims_in, coupling_conditioner)
 
     return distrax.Chain([actnorm, conv, coupler])
+    # return distrax.Chain([actnorm, conv])
+    # return distrax.Chain([actnorm, coupler])
+    # return distrax.Chain([coupler])
+
+
+
 
 
 if __name__ == "__main__":
-    pass
+    n = 1
+    k = 10
+    shape = (32, 10, 16)
+    x= np.random.normal(size=shape)
+    
+    def make_coupler():
+        net = hk.Sequential([
+            hk.Flatten(),
+            hk.nets.MLP( (32, 32), activate_final=True),
+            hk.Linear( 2 // 2 * np.prod(shape[1:])),
+            hk.Reshape( (*shape[1:-1], shape[-1] // 2, 2))
+        ])
+        return net
+
+    def forward(x):
+        blocks = []
+        for i in range(n):
+            coupler = make_coupler()
+            block = make_flowblock(shape, coupler)
+            blocks.append(block)
+        return distrax.Chain(blocks).forward_and_log_det(x)
+
+    def backward(x):
+        blocks = []
+        for i in range(n):
+            coupler = make_coupler()
+            block = make_flowblock(shape, coupler)
+            blocks.append(block)
+        return distrax.Chain(blocks).inverse_and_log_det(x)
+
+    fwd = hk.without_apply_rng(hk.transform(forward))
+    params = fwd.init(jax.random.PRNGKey(42), x)
+
+    bwd = hk.without_apply_rng(hk.transform(backward))
+
+    y = x
+    logdet = 0
+    for i in range(k):
+        y, ld = fwd.apply(params, y)
+        logdet += ld 
+
+    inv = y
+    for i in range(k):
+        inv, ld = bwd.apply(params, inv)
+        logdet += ld
+
+    print(np.mean(x**2), np.mean(y**2), np.mean(inv**2), np.mean((x - inv)**2), np.mean(np.abs(logdet)))
