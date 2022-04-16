@@ -10,8 +10,8 @@ from absl.testing import parameterized, absltest
 class ConvTest(chex.TestCase):
     @parameterized.named_parameters(
         ('case_1d_n1', (1, 10, 4), 1),
-        ('case_2d_n1', (1, 10, 10, 4), 1),
-        ('case_1d_n5', (1, 10, 4), 5),
+        ('case_2d_n1', (2, 10, 10, 4), 1),
+        ('case_1d_n5', (2, 10, 4), 5),
         ('case_2d_n5', (1, 10, 10, 4), 5),
     )
     def test(self, shape, n):
@@ -40,8 +40,12 @@ class ConvTest(chex.TestCase):
         bwd = hk.without_apply_rng(hk.transform(backward))
         inv, inv_logdet = bwd.apply(params, y)
 
-        assert np.allclose(x, inv, atol=1e-6), np.max(np.abs((x - inv)))
-        assert np.allclose(logdet + inv_logdet, 0, atol=1e-6), (logdet, inv_logdet)
+        # careful, as these convs are initialized with orthogonal matrices
+        # A better test would override this initialization with something else
+        # to test for non-orthogonal determinant calculations (i.e. det != 0)
+        assert np.allclose(x, inv, atol=1e-6 ), np.max(np.abs((x - inv)))
+        assert np.allclose(logdet + inv_logdet, 0, atol=1e-6 * np.prod(shape[1:-1])), (logdet, inv_logdet)
+        assert logdet.shape == shape[0:1], logdet.shape
 
 class ActNormTest(chex.TestCase):
     @parameterized.named_parameters(
@@ -75,10 +79,13 @@ class ActNormTest(chex.TestCase):
 
 
         bwd = hk.without_apply_rng(hk.transform(backward))
-        inv, inv_logdet = bwd.apply(params, y)
+        inv, inv_logdet = bwd.apply(params, y)  
 
+        assert logdet.shape == shape[0:1], logdet.shape
         assert np.allclose(x, inv, atol=1e-6), np.max(np.abs(x - inv))
         assert np.allclose(logdet, -inv_logdet, atol=1e-6), (logdet, inv_logdet)
+        mean, std = np.mean(y), np.std(y)
+        assert np.allclose([mean, std], [0., 1.], atol=1e-6), (mean, std, np.mean(x), np.std(x))
 
 class FlowTest(chex.TestCase):
     @parameterized.named_parameters(
@@ -128,8 +135,9 @@ class FlowTest(chex.TestCase):
         bwd = hk.without_apply_rng(hk.transform(backward))
         inv, inv_logdet = bwd.apply(params, y)
 
+        assert logdet.shape == shape[0:1], logdet.shape
         assert np.allclose(x, inv, atol=1e-5), np.max(np.abs((x - inv)))
-        assert np.allclose(logdet, -inv_logdet, atol=1e-5), (logdet, inv_logdet)
+        assert np.allclose(logdet, -inv_logdet, atol=1e-6 * np.prod(shape[1:-1])), (logdet, inv_logdet)
 
 
 class CouplerTest(chex.TestCase):
@@ -177,8 +185,9 @@ class CouplerTest(chex.TestCase):
 
         bwd = hk.without_apply_rng(hk.transform(backward))
         inv, inv_logdet = bwd.apply(params, y)
-
-        # assert np.allclose(x, inv, rtol=1e-4), np.max(np.abs((x - inv)))
+        
+        assert logdet.shape == shape[0:1], logdet.shape
+        assert np.allclose(x, inv, rtol=1e-4), np.max(np.abs((x - inv)))
         assert np.allclose(logdet, -inv_logdet), (logdet + inv_logdet, logdet, inv_logdet) 
 
 if __name__ == "__main__":

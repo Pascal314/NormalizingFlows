@@ -21,7 +21,9 @@ class Invertable1x1Conv(distrax.Bijector):
     def forward_and_log_det(self, x):
         y = self.conv(x)
         W = next(iter(self.conv.params_dict().values()))
-        logdet = jnp.log(jnp.abs(jnp.linalg.det(W)))
+        logdet = jnp.log(jnp.abs(jnp.linalg.det(jnp.squeeze(W))))
+        logdet = jnp.broadcast_to(logdet, x.shape[:-1]).reshape(x.shape[0], -1)
+        logdet = jnp.sum(logdet, axis=-1)
         return y, logdet
 
     def inverse_and_log_det(self, y):
@@ -40,9 +42,12 @@ class Invertable1x1Conv(distrax.Bijector):
 
         window_strides = (1,) * self.num_spatial_dims
         x = jax.lax.conv(jnp.transpose(y, input_axis_perm), jnp.transpose(W_inv, filter_axis_perm) , window_strides, 'same')
-        logdet = jnp.log(jnp.abs(jnp.linalg.det(W_inv)))
-
         x = jnp.transpose(x, output_axis_perm)
+        # This class should be separated into a Module and Bijector for improved readability,
+        # so that the actual module and logdet broadcasting trickery are split.
+        logdet = jnp.log(jnp.abs(jnp.linalg.det(jnp.squeeze(W_inv))))
+        logdet = jnp.broadcast_to(logdet, y.shape[:-1]).reshape(y.shape[0], -1)
+        logdet = jnp.sum(logdet, axis=-1)
         return x, logdet
 
 
@@ -50,8 +55,10 @@ class ActnormModule(hk.Module):
     eps = 1e-12
     def __call__(self, x, reverse=False):
         # notation taken from GLOW
-        b = hk.get_parameter('b', (1,) * (len(x.shape) - 1) + (x.shape[-1],), init=hk.initializers.Constant(0.))
-        s = hk.get_parameter('s', (1,) * (len(x.shape) - 1) + (x.shape[-1],), init=hk.initializers.Constant(1.))
+        s = hk.get_parameter('s', (1,) * (len(x.shape) - 1) + (x.shape[-1],), 
+                            init=hk.initializers.Constant(1 / np.std(x, axis=(*range(len(x.shape) - 1),)) ))
+        b = hk.get_parameter('b', (1,) * (len(x.shape) - 1) + (x.shape[-1],), 
+                            init=hk.initializers.Constant(- np.mean(s * x, axis=(*range(len(x.shape) - 1),)) ))
         logdet = jnp.sum(jnp.log(jnp.abs(s)))
 
         if not reverse:
@@ -67,10 +74,15 @@ class ActNormBijector(distrax.Bijector):
         self.actnorm = ActnormModule()
     
     def forward_and_log_det(self, x):
-        return self.actnorm(x, reverse=False)
-
+        y, logdet = self.actnorm(x, reverse=False)
+        # this broadcast operation should depend on event_ndims_in!
+        # I am now in correctly assuming that there is always only one batch dimension
+        logdet = jnp.broadcast_to(logdet, (y.shape[0], ))
+        return y, logdet
     def inverse_and_log_det(self, y):
-        return self.actnorm(y, reverse=True)
+        x, logdet = self.actnorm(y, reverse=True)
+        logdet = jnp.broadcast_to(logdet, (x.shape[0], ))
+        return x, logdet
 
 def make_affine_coupler(split_index, event_ndims_in, coupling_conditioner):
     bijector = lambda params: distrax.ScalarAffine(params['shift'], params['scale'])
@@ -94,18 +106,22 @@ def make_flowblock(input_shape, coupling_conditioner):
     actnorm = ActNormBijector(event_ndims_in)
     conv = Invertable1x1Conv(event_ndims_in, input_shape[-1], num_spatial_dims)
 
-    split_index = input_shape[-1] // 2
-    bijector = lambda params: distrax.ScalarAffine(params['shift'], params['scale'])
-    coupler = make_affine_coupler(split_index, event_ndims_in, coupling_conditioner)
+    # split_index = input_shape[-1] // 2
+    # bijector = lambda params: distrax.ScalarAffine(params['shift'], params['scale'])
+    # coupler = make_affine_coupler(split_index, event_ndims_in, coupling_conditioner)
 
-    return distrax.Chain([actnorm, conv, coupler])
-    # return distrax.Chain([actnorm, conv])
-    # return distrax.Chain([actnorm, coupler])
+    # return distrax.Chain([actnorm, conv, coupler])
+    return distrax.Chain([actnorm, conv])
     # return distrax.Chain([coupler])
 
 
 
-
+# class Glow(hk.Module):
+#     def __init__(self, K, L):
+#         self.K = K
+#         self.L = L
+    
+#     def __call__(self, x):
 
 if __name__ == "__main__":
     n = 1
