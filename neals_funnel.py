@@ -120,5 +120,5 @@ if __name__ == "__main__":
     axes[1].set_title('latent space')
     axes[1].scatter(latent[:, 0, 0], latent[:, 0, 1], label='latent', alpha=0.1)
     fig.set_size_inches(10, 4)
-    plt.savefig('neals_funnel.pdf')
+    plt.savefig('neals_funnel.png')
     plt.show()
