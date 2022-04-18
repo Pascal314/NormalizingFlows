@@ -48,50 +48,59 @@ if __name__ == "__main__":
         # return distrax.Chain(blocks[::-1])
 
     
-    @hk.without_apply_rng
     @hk.transform
     def log_prob(x):
         model, _ = make_flow_model()
-        x = jnp.stack([x] * k, axis=-1)
-        return model.log_prob(x)
+        u = jax.random.uniform(hk.next_rng_key(), shape=(x.shape[0], 1, k-1))
+        u = jax.random.normal(hk.next_rng_key(), shape=(x.shape[0], 1, k-1))
+        x = jnp.concatenate([x[..., None], u], axis=-1)
+        return model.log_prob(x) + distrax.Independent(distrax.Normal(jnp.zeros(u.shape), jnp.ones(u.shape)), 2).log_prob(u)
 
-    def loss_fn(params):
-        loss = -jnp.mean(log_prob.apply(params, data))
+    def loss_fn(params, key):
+        loss = -jnp.mean(log_prob.apply(params, key, data))
         return loss
 
     opt = optax.adam(3e-4)
 
     @jax.jit
-    def update(params, opt_state):
-        loss, grads = jax.value_and_grad(loss_fn)(params)
+    def update(params, opt_state, key):
+        loss, grads = jax.value_and_grad(loss_fn)(params, key)
         updates, opt_state = opt.update(grads, opt_state)
         params = optax.apply_updates(params, updates)
         return loss, params, opt_state
 
-    params = log_prob.init(jax.random.PRNGKey(42), data)
+    key = jax.random.PRNGKey(42)
+    key, subkey = jax.random.split(key, 2)
+    params = log_prob.init(subkey, data)
     print(jax.tree_map(lambda x: x.shape, params))
 
-    print(log_prob.apply(params, data))
-    print(loss_fn(params))
+    key, subkey = jax.random.split(key, 2)
+
+    print(log_prob.apply(params, subkey, data))
+    key, subkey = jax.random.split(key, 2)
+
+    print(loss_fn(params, subkey))
 
     opt_state = opt.init(params)
 
-    # print(params)
-
     for i in range(10000):
-        loss, params, opt_state = update(params, opt_state)
+        key, subkey = jax.random.split(key, 2)
+
+        loss, params, opt_state = update(params, opt_state, subkey)
         if i % 1000 == 0:
             print(loss)
 
         
         if i % 3000 == 0:
             x = np.linspace(-200, 200, 10000).reshape(-1, 1)
-            approximate_pdf = log_prob.apply(params, x)
+            key, subkey = jax.random.split(key, 2)
+            approximate_pdf = log_prob.apply(params, subkey, x)
             I1 = integrate.simpson(np.exp(approximate_pdf), x.flatten())
             print(np.log(I1), I1)
     
     x = np.linspace(-20, 20, 10000).reshape(-1, 1)
-    approximate_pdf = log_prob.apply(params, x)
+    key, subkey = jax.random.split(key, 2)
+    approximate_pdf = log_prob.apply(params, subkey, x)
     plt.plot(x, 0.5 * (norm(-.5, .1).pdf(x) + norm(.5, .1).pdf(x)))
     
     I1 = integrate.simpson(np.exp(approximate_pdf), x.flatten())
@@ -102,17 +111,20 @@ if __name__ == "__main__":
     print(np.log(I2))
     print(I2)
  
-    @hk.without_apply_rng
+
     @hk.transform
     def round_trip(x):
         model, bijection = make_flow_model()
-        x = jnp.stack([x] * k, axis=-1)
+        # u = jax.random.uniform(hk.next_rng_key(), shape=(x.shape[0], 1, k-1))
+        u = jax.random.normal(hk.next_rng_key(), shape=(x.shape[0], 1, k-1))
 
+        x = jnp.concatenate([x[..., None], u], axis=-1)
         y, det = bijection.inverse_and_log_det(x) 
         inv, inv_det = bijection.forward_and_log_det(y)
         return y, det, inv, inv_det, model.log_prob(x)
 
-    y, det, inv, inv_det, prob = round_trip.apply(params, x)
+    key, subkey = jax.random.split(key, 2)
+    y, det, inv, inv_det, prob = round_trip.apply(params, subkey, x)
     print(x)
     print(y[:, 0, 0])
     print(inv[:, 0, 0])

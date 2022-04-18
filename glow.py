@@ -106,22 +106,11 @@ def make_flowblock(input_shape, coupling_conditioner):
     actnorm = ActNormBijector(event_ndims_in)
     conv = Invertable1x1Conv(event_ndims_in, input_shape[-1], num_spatial_dims)
 
-    # split_index = input_shape[-1] // 2
-    # bijector = lambda params: distrax.ScalarAffine(params['shift'], params['scale'])
-    # coupler = make_affine_coupler(split_index, event_ndims_in, coupling_conditioner)
+    split_index = input_shape[-1] // 2
+    bijector = lambda params: distrax.ScalarAffine(params['shift'], params['scale'])
+    coupler = make_affine_coupler(split_index, event_ndims_in, coupling_conditioner)
 
-    # return distrax.Chain([actnorm, conv, coupler])
-    return distrax.Chain([actnorm, conv])
-    # return distrax.Chain([coupler])
-
-
-
-# class Glow(hk.Module):
-#     def __init__(self, K, L):
-#         self.K = K
-#         self.L = L
-    
-#     def __call__(self, x):
+    return distrax.Chain([actnorm, conv, coupler])
 
 if __name__ == "__main__":
     n = 1
