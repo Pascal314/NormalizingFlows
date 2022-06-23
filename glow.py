@@ -4,6 +4,26 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 
+#TODO: Think how to properly implement this, maybe the parameters can be initialized in a separate function?
+# Ideally we dont get P in the trainable parameters, and L,U, s inits all depend on the initialization of 
+# one matrix W. I think this has to do with custom creators, setters and getters.
+class LUConv(hk.Module):
+    def __init__(self, n_channels, spatial_dims):
+        super().__init__()
+        self.conv, _ = hk.without_apply_rng(hk.transform(lambda x: hk.ConvND(num_spatial_dims, n_channels, 1, with_bias=False)))
+        self.L_mask = jnp.tril(jnp.ones( (n_channels, n_channels) ), k=-1)
+        self.U_mask = jnp.transpose(self.L_mask)
+
+        
+        self.n_channels = n_channels
+
+    def __call__(self, x):
+        P = hk.get_parameter('p', shape=(self.n_channels, self.n_channels))
+        L = hk.get_parameter('l', shape=(self.n_channels, self.n_channels)) * self.L_mask
+        U = hk.get_parameter('u', shape=(self.n_channels, self.n_channels)) * self.U_mask       
+        S = hk.get_parameter('s', shape=(self.n_channels,))
+
+
 class RandomRotationMatrix(hk.initializers.Initializer):
     def __call__(self, shape, dtype):
         # Assumes the final 2 dimensions are the (in_channels, out_channels) dims
@@ -11,6 +31,12 @@ class RandomRotationMatrix(hk.initializers.Initializer):
         W = jnp.zeros((shape[-1], shape[-1]), dtype=dtype)
         W = W.at[jnp.arange(shape[-1]), perm].set(1.)
         return jnp.broadcast_to(W, shape)
+
+@jax.jit
+def stable_log_det(W):
+    # scipy puts the diagonal in U, L has diagonal of ones.
+    P, L, U = jax.scipy.linalg.lu(W)
+    return jnp.sum(jnp.log(jnp.abs(jnp.diag(U))))
 
 class Invertable1x1Conv(distrax.Bijector):
     def __init__(self, event_ndims_in, n_channels, num_spatial_dims):
@@ -21,7 +47,8 @@ class Invertable1x1Conv(distrax.Bijector):
     def forward_and_log_det(self, x):
         y = self.conv(x)
         W = next(iter(self.conv.params_dict().values()))
-        logdet = jnp.log(jnp.abs(jnp.linalg.det(jnp.squeeze(W))))
+        # logdet = jnp.log(jnp.abs(jnp.linalg.det(jnp.squeeze(W))))
+        logdet = stable_log_det(W.squeeze())
         logdet = jnp.broadcast_to(logdet, x.shape[:-1]).reshape(x.shape[0], -1)
         logdet = jnp.sum(logdet, axis=-1)
         return y, logdet
@@ -45,7 +72,8 @@ class Invertable1x1Conv(distrax.Bijector):
         x = jnp.transpose(x, output_axis_perm)
         # This class should be separated into a Module and Bijector for improved readability,
         # so that the actual module and logdet broadcasting trickery are split.
-        logdet = jnp.log(jnp.abs(jnp.linalg.det(jnp.squeeze(W_inv))))
+        # logdet = jnp.log(jnp.abs(jnp.linalg.det(jnp.squeeze(W_inv))))
+        logdet = stable_log_det(W_inv.squeeze())
         logdet = jnp.broadcast_to(logdet, y.shape[:-1]).reshape(y.shape[0], -1)
         logdet = jnp.sum(logdet, axis=-1)
         return x, logdet
@@ -56,9 +84,9 @@ class ActnormModule(hk.Module):
     def __call__(self, x, reverse=False):
         # notation taken from GLOW
         s = hk.get_parameter('s', (1,) * (len(x.shape) - 1) + (x.shape[-1],), 
-                            init=hk.initializers.Constant(1 / np.std(x, axis=(*range(len(x.shape) - 1),)) ))
+                            init=hk.initializers.Constant(1 / (jnp.std(x, axis=(*range(len(x.shape) - 1),)) + self.eps)))
         b = hk.get_parameter('b', (1,) * (len(x.shape) - 1) + (x.shape[-1],), 
-                            init=hk.initializers.Constant(- np.mean(s * x, axis=(*range(len(x.shape) - 1),)) ))
+                            init=hk.initializers.Constant(- jnp.mean(s * x, axis=(*range(len(x.shape) - 1),)) ))
         logdet = jnp.sum(jnp.log(jnp.abs(s)))
 
         if not reverse:
